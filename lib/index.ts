@@ -32,11 +32,34 @@ interface BroadcastFlags {
   compress?: boolean;
 }
 
+export interface MongoEmitterOptions {
+  /**
+   * Add a createdAt field to each MongoDB document
+   * @default false
+   */
+  addCreatedAtField?: boolean;
+}
+
 export class Emitter<
   EmitEvents extends EventsMap = DefaultEventsMap,
   ServerSideEvents extends EventsMap = DefaultEventsMap
 > {
-  constructor(readonly mongoCollection: any, readonly nsp: string = "/") {}
+  private mongoCollection: any;
+  private opts: Required<MongoEmitterOptions>;
+
+  constructor(
+    mongoCollection: any,
+    readonly nsp: string = "/",
+    opts: MongoEmitterOptions = {}
+  ) {
+    this.mongoCollection = mongoCollection;
+    this.opts = Object.assign(
+      {
+        addCreatedAtField: false,
+      },
+      opts
+    );
+  }
 
   /**
    * Return a new emitter for the given namespace.
@@ -45,7 +68,11 @@ export class Emitter<
    * @public
    */
   public of(nsp: string): Emitter {
-    return new Emitter(this.mongoCollection, (nsp[0] !== "/" ? "/" : "") + nsp);
+    return new Emitter(
+      this.mongoCollection,
+      (nsp[0] !== "/" ? "/" : "") + nsp,
+      this.opts
+    );
   }
 
   /**
@@ -162,14 +189,24 @@ export class Emitter<
       throw new Error("Acknowledgements are not supported");
     }
 
-    this.mongoCollection.insertOne({
-      uid: EMITTER_UID,
-      nsp: this.nsp,
+    this._publish({
       type: EventType.SERVER_SIDE_EMIT,
       data: {
         packet: [ev, ...args],
       },
     });
+  }
+
+  _publish(document: any) {
+    document.uid = EMITTER_UID;
+    document.nsp = this.nsp;
+
+    if (this.opts.addCreatedAtField) {
+      document.createdAt = new Date();
+    }
+
+    debug("publishing %j", document);
+    this.mongoCollection.insertOne(document);
   }
 }
 
@@ -281,14 +318,6 @@ export class BroadcastOperator<EmitEvents extends EventsMap>
     );
   }
 
-  private publish(document: any) {
-    document.uid = EMITTER_UID;
-    document.nsp = this.emitter.nsp;
-
-    debug("publishing %j", document);
-    this.emitter.mongoCollection.insertOne(document);
-  }
-
   /**
    * Emits to all clients.
    *
@@ -317,7 +346,7 @@ export class BroadcastOperator<EmitEvents extends EventsMap>
       except: [...this.exceptRooms],
     };
 
-    this.publish({
+    this.emitter._publish({
       type: EventType.BROADCAST,
       data: {
         packet,
@@ -335,7 +364,7 @@ export class BroadcastOperator<EmitEvents extends EventsMap>
    * @public
    */
   public socketsJoin(rooms: string | string[]): void {
-    this.publish({
+    this.emitter._publish({
       type: EventType.SOCKETS_JOIN,
       data: {
         opts: {
@@ -354,7 +383,7 @@ export class BroadcastOperator<EmitEvents extends EventsMap>
    * @public
    */
   public socketsLeave(rooms: string | string[]): void {
-    this.publish({
+    this.emitter._publish({
       type: EventType.SOCKETS_LEAVE,
       data: {
         opts: {
@@ -373,7 +402,7 @@ export class BroadcastOperator<EmitEvents extends EventsMap>
    * @public
    */
   public disconnectSockets(close: boolean = false): void {
-    this.publish({
+    this.emitter._publish({
       type: EventType.DISCONNECT_SOCKETS,
       data: {
         opts: {
